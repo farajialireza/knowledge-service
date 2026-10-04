@@ -60,3 +60,45 @@ class DocumentStatusResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: Literal["ok", "degraded"]
     database: Literal["up", "down"]
+
+
+class DocumentListItem(BaseModel):
+    """One row of the admin document list."""
+
+    id: UUID
+    name: str
+    mime_type: str
+    size: int = Field(description="File size in bytes.")
+    status: DocumentStatus
+    usage_count: int
+    last_used_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    chunk_count: int = Field(description="Number of stored chunks (0 until ingestion finishes).")
+
+
+class DocumentListResponse(BaseModel):
+    items: list[DocumentListItem]
+    total: int = Field(description="Total number of documents (ignores pagination).")
+    limit: int
+    offset: int
+
+
+class IngestionJobResponse(BaseModel):
+    """One ingestion job from a document's history."""
+
+    id: UUID
+    document_id: UUID
+    status: JobStatus
+    error_code: str | None
+    error_message: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime
+
+
+class DocumentStatusUpdateRequest(BaseModel):
+    """Allowed admin status transitions. `processing` and `failed` are owned by
+    the ingestion pipeline and cannot be set manually."""
+
+    status: Literal["active", "inactive"]

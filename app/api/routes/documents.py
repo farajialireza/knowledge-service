@@ -1,17 +1,29 @@
-"""Admin document endpoints: upload (kicks off async ingestion) and status."""
+"""Admin document endpoints: upload (kicks off async ingestion), listing,
+status management, job history and deletion."""
 import hashlib
 import logging
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import JSONResponse
 from psycopg.errors import UniqueViolation
 
 from app.api.schemas import (
     DocumentAcceptedResponse,
     DocumentDeduplicatedResponse,
+    DocumentListResponse,
     DocumentStatusResponse,
+    DocumentStatusUpdateRequest,
+    IngestionJobResponse,
 )
 from app.config import get_settings
 from app.ingestion.repository import Repository
@@ -163,3 +175,134 @@ async def get_document(request: Request, document_id: UUID):
     if row is None:
         raise HTTPException(status_code=404, detail="Document not found")
     return row
+
+
+_NOT_FOUND = {
+    404: {
+        "description": "Unknown document ID.",
+        "content": {"application/json": {"example": {"detail": "Document not found"}}},
+    }
+}
+
+
+@router.get(
+    "",
+    response_model=DocumentListResponse,
+    summary="List documents",
+    description=(
+        "Documents ordered newest-first with status and chunk count, "
+        "for the admin panel. Supports pagination via `limit`/`offset`."
+    ),
+)
+async def list_documents(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    repo = Repository(request.app.state.db_pool)
+    items, total = await repo.list_documents(limit=limit, offset=offset)
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
+@router.delete(
+    "/{document_id}",
+    status_code=204,
+    summary="Delete a document",
+    description=(
+        "Deletes the document row in one transaction — chunks and ingestion "
+        "jobs are removed by the schema's ON DELETE CASCADE — then removes the "
+        "stored file from disk (only if no other document shares the same file "
+        "bytes). Refused with 409 while ingestion is still running, so a "
+        "background job can never be left in an inconsistent state."
+    ),
+    responses={
+        **_NOT_FOUND,
+        409: {
+            "description": "Document is being ingested right now.",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Document is being ingested; try again after it finishes"}
+                }
+            },
+        },
+    },
+)
+async def delete_document(request: Request, document_id: UUID):
+    repo = Repository(request.app.state.db_pool)
+    document = await repo.get_document(document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    # Deleting mid-ingestion would strand the background task writing chunks
+    # for a row that no longer exists; refuse instead of racing it.
+    if document["status"] == "processing":
+        raise HTTPException(
+            status_code=409,
+            detail="Document is being ingested; try again after it finishes",
+        )
+    file_path = await repo.delete_document(document_id)
+    if file_path is None:  # pragma: no cover - raced with another delete
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Physical file is removed only after the DB transaction committed, and
+    # only when no other row references the same content-addressed file.
+    try:
+        path = Path(file_path)
+        if not await repo.file_hash_in_use(path.stem):
+            path.unlink(missing_ok=True)
+    except OSError:
+        # DB is already consistent; a leftover file is only wasted disk, so
+        # we log loudly instead of failing the request.
+        logger.exception("Could not remove stored file %s", file_path)
+    return None
+
+
+@router.patch(
+    "/{document_id}/status",
+    response_model=DocumentStatusResponse,
+    summary="Activate or deactivate a document",
+    description=(
+        "Toggle a document between `active` (retrievable) and `inactive` "
+        "(hidden from future retrieval). Only `active`/`inactive` may be set — "
+        "`processing` and `failed` belong to the ingestion pipeline. Refused "
+        "with 409 while ingestion is running."
+    ),
+    responses={
+        **_NOT_FOUND,
+        409: {
+            "description": "Document is being ingested right now.",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Document is being ingested; status cannot be changed yet"}
+                }
+            },
+        },
+    },
+)
+async def update_document_status(
+    request: Request, document_id: UUID, body: DocumentStatusUpdateRequest
+):
+    repo = Repository(request.app.state.db_pool)
+    document = await repo.get_document(document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if document["status"] == "processing":
+        raise HTTPException(
+            status_code=409,
+            detail="Document is being ingested; status cannot be changed yet",
+        )
+    await repo.set_document_status(document_id, body.status)
+    return await repo.get_document_with_latest_job(document_id)
+
+
+@router.get(
+    "/{document_id}/jobs",
+    response_model=list[IngestionJobResponse],
+    summary="List ingestion jobs for a document",
+    description="Full ingestion job history (status, errors, timestamps), newest first.",
+    responses={**_NOT_FOUND},
+)
+async def list_document_jobs(request: Request, document_id: UUID):
+    repo = Repository(request.app.state.db_pool)
+    if await repo.get_document(document_id) is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return await repo.list_jobs(document_id)

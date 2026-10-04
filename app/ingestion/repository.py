@@ -86,6 +86,54 @@ class Repository:
             )
             return await cur.fetchone()
 
+    async def list_documents(self, *, limit: int, offset: int) -> tuple[list[dict], int]:
+        """Documents ordered newest-first, each with its chunk count."""
+        async with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SELECT COUNT(*) FROM ai_assistant.documents")
+            total = (await cur.fetchone())["count"]
+            await cur.execute(
+                """
+                SELECT d.id, d.name, d.mime_type, d.size, d.status,
+                       d.usage_count, d.last_used_at, d.created_at, d.updated_at,
+                       (SELECT COUNT(*) FROM ai_assistant.document_chunks c
+                        WHERE c.document_id = d.id) AS chunk_count
+                FROM ai_assistant.documents d
+                ORDER BY d.created_at DESC
+                LIMIT %s OFFSET %s
+                """,
+                (limit, offset),
+            )
+            return await cur.fetchall(), total
+
+    async def list_jobs(self, document_id: UUID) -> list[dict]:
+        """Full ingestion job history for one document, newest first."""
+        async with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                """
+                SELECT id, document_id, status, error_code, error_message,
+                       started_at, finished_at, created_at
+                FROM ai_assistant.ingestion_jobs
+                WHERE document_id = %s
+                ORDER BY created_at DESC
+                """,
+                (document_id,),
+            )
+            return await cur.fetchall()
+
+    async def set_document_status(self, document_id: UUID, status: str) -> bool:
+        """Set a document's status. Returns False if the document doesn't exist.
+
+        Callers must never pass 'processing' or 'failed' here — those are owned
+        by the ingestion pipeline; see the PATCH route for the enforced policy.
+        """
+        async with self._pool.connection() as conn:
+            cursor = await conn.execute(
+                "UPDATE ai_assistant.documents "
+                "SET status = %s, updated_at = NOW() WHERE id = %s",
+                (status, document_id),
+            )
+            return cursor.rowcount > 0
+
     # ---- document + job creation ----------------------------------------
 
     async def create_document_with_job(
@@ -184,3 +232,31 @@ class Repository:
                 "finished_at = NOW() WHERE id = %s",
                 (code, message, job_id),
             )
+
+    # ---- deletion ---------------------------------------------------------
+
+    async def delete_document(self, document_id: UUID) -> str | None:
+        """Delete the document row in one transaction and return its file path.
+
+        Chunks and ingestion jobs are removed by the schema's ON DELETE CASCADE,
+        so no orphan rows can remain. Returns the stored file path so the
+        caller can remove the physical file AFTER the transaction commits
+        (file deletion is not transactional and must be last).
+        Returns None when the document does not exist.
+        """
+        async with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            await cur.execute(
+                "DELETE FROM ai_assistant.documents WHERE id = %s RETURNING file_path",
+                (document_id,),
+            )
+            row = await cur.fetchone()
+        return row[0] if row else None
+
+    async def file_hash_in_use(self, file_hash: str) -> bool:
+        """True if another document still references these file bytes."""
+        async with self._pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT EXISTS(SELECT 1 FROM ai_assistant.documents WHERE file_hash = %s)",
+                (file_hash,),
+            )
+            return (await cursor.fetchone())[0]

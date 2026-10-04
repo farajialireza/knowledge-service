@@ -67,6 +67,36 @@ Poll this endpoint (e.g. every 1–2 s) until `status` leaves `processing`.
 
 `404` if the ID is unknown.
 
+### `GET /documents` — list
+
+Admin listing, newest first. Query params: `limit` (1–200, default 50) and
+`offset` (default 0). Each item includes `status`, `chunk_count`,
+`usage_count`, `last_used_at` and timestamps; the envelope carries `total`,
+`limit`, `offset`.
+
+### `PATCH /documents/{id}/status` — activate/deactivate
+
+Body: `{"status": "active"}` or `{"status": "inactive"}`. Only these two
+values are accepted — `processing`/`failed` belong to the ingestion pipeline.
+Returns the full document status payload (same shape as `GET /documents/{id}`).
+`404` unknown ID; `409` while ingestion is running; `422` for any other
+status value.
+
+### `GET /documents/{id}/jobs` — job history
+
+Returns the document's ingestion jobs, newest first: `status`, `error_code`,
+`error_message`, `started_at`, `finished_at`, `created_at`. `404` if the
+document does not exist.
+
+### `DELETE /documents/{id}` — delete
+
+`204` on success. The document row is deleted in a single transaction —
+chunks and ingestion jobs are removed by the schema's `ON DELETE CASCADE` —
+and the stored file is deleted afterwards, but only when no other document
+references the same content-addressed file. Refused with `409` while
+ingestion is running (a background job can never be stranded); `404` if the
+document does not exist.
+
 ## Status model
 
 **Document** (`ai_assistant.documents.status`):
