@@ -5,6 +5,12 @@ only, accessed directly via `psycopg` 3 — no ORM, no migrations tool. The
 database schema (`ai_assistant.*`) is managed externally (see `../db.sql`);
 this service never creates or alters tables.
 
+## Documentation
+
+- Interactive API docs (Swagger UI): `GET /docs`
+- Ingestion pipeline: [docs/ingestion.en.md](docs/ingestion.en.md) (English) ·
+  [docs/ingestion.fa.md](docs/ingestion.fa.md) (فارسی)
+
 ## Stack
 
 - FastAPI + uvicorn (ASGI)
