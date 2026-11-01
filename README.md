@@ -2,7 +2,7 @@
 
 Standalone FastAPI service providing the AI knowledge base backend. PostgreSQL
 only, accessed directly via `psycopg` 3 — no ORM, no migrations tool. The
-database schema (`ai_assistant.*`) is managed externally (see `../db.sql`);
+database schema (`ai_assistant.*`) is managed externally (see `tables.sql`);
 this service never creates or alters tables.
 
 ## Documentation
